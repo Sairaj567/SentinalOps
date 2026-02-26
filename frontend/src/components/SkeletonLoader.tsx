@@ -5,9 +5,9 @@
 import React from 'react';
 
 // Base skeleton block
-function Skeleton({ className = '' }: { className?: string }) {
+function Skeleton({ className = '', style }: { className?: string; style?: React.CSSProperties }) {
   return (
-    <div className={`animate-shimmer rounded-lg ${className}`} />
+    <div className={`animate-shimmer rounded-lg ${className}`} style={style} />
   );
 }
 

@@ -14,7 +14,7 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
-  const { login } = useAuthStore();
+  const { setAuth } = useAuthStore();
   const navigate = useNavigate();
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -24,7 +24,7 @@ export default function Login() {
 
     try {
       const response = await api.post('/auth/login', { email, password });
-      login(response.data.token, response.data.user);
+      setAuth(response.data.token, response.data.user);
       toast.success('Welcome back!');
       navigate('/dashboard');
     } catch (err: any) {
@@ -42,12 +42,12 @@ export default function Login() {
         email: 'admin@sentinelops.io',
         password: 'Admin@2025!',
       });
-      login(response.data.token, response.data.user);
+      setAuth(response.data.token, response.data.user);
       toast.success('Demo mode activated!');
       navigate('/dashboard');
     } catch (err: any) {
       // Fallback: create demo token for offline use
-      login('demo-token', { name: 'Admin User', email: 'admin@sentinelops.io', role: 'admin' });
+      setAuth('demo-token', { name: 'Admin User', email: 'admin@sentinelops.io', role: 'admin' } as any);
       toast.success('Demo mode activated (offline)');
       navigate('/dashboard');
     } finally {
