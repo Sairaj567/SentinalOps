@@ -1,0 +1,148 @@
+# =============================================================================
+# SentinelOps - Semgrep Configuration
+# =============================================================================
+# SAST rules for security scanning
+# =============================================================================
+
+rules:
+  # ---------------------------------------------------------------------------
+  # SQL Injection Detection
+  # ---------------------------------------------------------------------------
+  - id: sql-injection-string-concat
+    patterns:
+      - pattern-either:
+          - pattern: $QUERY = "..." + $INPUT + "..."
+          - pattern: $QUERY = `...${$INPUT}...`
+          - pattern: $QUERY = f"...{$INPUT}..."
+    message: "Potential SQL injection via string concatenation"
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: "CWE-89"
+      owasp: "A03:2021"
+
+  # ---------------------------------------------------------------------------
+  # Command Injection Detection
+  # ---------------------------------------------------------------------------
+  - id: command-injection
+    patterns:
+      - pattern-either:
+          - pattern: exec($CMD)
+          - pattern: execSync($CMD)
+          - pattern: spawn($CMD, ...)
+          - pattern: os.system($CMD)
+          - pattern: subprocess.call($CMD, shell=True)
+    message: "Potential command injection vulnerability"
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: "CWE-78"
+      owasp: "A03:2021"
+
+  # ---------------------------------------------------------------------------
+  # Hardcoded Secrets
+  # ---------------------------------------------------------------------------
+  - id: hardcoded-password
+    patterns:
+      - pattern-either:
+          - pattern: password = "..."
+          - pattern: PASSWORD = "..."
+          - pattern: api_key = "..."
+          - pattern: API_KEY = "..."
+          - pattern: secret = "..."
+          - pattern: SECRET = "..."
+    message: "Hardcoded credential detected"
+    languages: [javascript, typescript, python, java]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: "CWE-798"
+
+  # ---------------------------------------------------------------------------
+  # XSS Prevention
+  # ---------------------------------------------------------------------------
+  - id: xss-innerHTML
+    pattern: $EL.innerHTML = $INPUT
+    message: "Potential XSS via innerHTML"
+    languages: [javascript, typescript]
+    severity: WARNING
+    metadata:
+      category: security
+      cwe: "CWE-79"
+      owasp: "A03:2021"
+
+  # ---------------------------------------------------------------------------
+  # Insecure Deserialization
+  # ---------------------------------------------------------------------------
+  - id: insecure-deserialization
+    patterns:
+      - pattern-either:
+          - pattern: eval($INPUT)
+          - pattern: pickle.loads($INPUT)
+          - pattern: yaml.load($INPUT)
+    message: "Potential insecure deserialization"
+    languages: [javascript, python]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: "CWE-502"
+      owasp: "A08:2021"
+
+  # ---------------------------------------------------------------------------
+  # Path Traversal
+  # ---------------------------------------------------------------------------
+  - id: path-traversal
+    patterns:
+      - pattern-either:
+          - pattern: fs.readFile($PATH + $INPUT, ...)
+          - pattern: fs.readFileSync($PATH + $INPUT, ...)
+          - pattern: open($PATH + $INPUT, ...)
+    message: "Potential path traversal vulnerability"
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: "CWE-22"
+
+  # ---------------------------------------------------------------------------
+  # Weak Cryptography
+  # ---------------------------------------------------------------------------
+  - id: weak-crypto-md5
+    patterns:
+      - pattern-either:
+          - pattern: crypto.createHash('md5')
+          - pattern: hashlib.md5(...)
+    message: "MD5 is cryptographically weak, use SHA-256 or stronger"
+    languages: [javascript, python]
+    severity: WARNING
+    metadata:
+      category: security
+      cwe: "CWE-328"
+
+  # ---------------------------------------------------------------------------
+  # Insecure HTTP
+  # ---------------------------------------------------------------------------
+  - id: insecure-http
+    pattern-regex: http://(?!localhost|127\.0\.0\.1)
+    message: "Insecure HTTP URL detected, use HTTPS"
+    languages: [generic]
+    severity: WARNING
+    metadata:
+      category: security
+      cwe: "CWE-319"
+
+  # ---------------------------------------------------------------------------
+  # JWT Issues
+  # ---------------------------------------------------------------------------
+  - id: jwt-none-algorithm
+    patterns:
+      - pattern: jwt.sign($PAYLOAD, ..., { algorithm: 'none' })
+      - pattern: jwt.decode($TOKEN, ..., algorithms=['none'])
+    message: "JWT with 'none' algorithm is insecure"
+    languages: [javascript, python]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: "CWE-347"

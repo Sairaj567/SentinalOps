@@ -1,0 +1,76 @@
+# SentinelOps - Gitleaks Configuration
+# Secret scanning rules
+
+title = "SentinelOps Gitleaks Config"
+
+[extend]
+useDefault = true
+
+# Custom rules
+[[rules]]
+id = "aws-access-key"
+description = "AWS Access Key"
+regex = '''(A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}'''
+tags = ["aws", "credentials"]
+
+[[rules]]
+id = "aws-secret-key"
+description = "AWS Secret Key"
+regex = '''(?i)aws_secret_access_key\s*=\s*['\"]?([A-Za-z0-9/+=]{40})['\"]?'''
+tags = ["aws", "credentials"]
+
+[[rules]]
+id = "github-token"
+description = "GitHub Token"
+regex = '''ghp_[a-zA-Z0-9]{36}'''
+tags = ["github", "token"]
+
+[[rules]]
+id = "generic-api-key"
+description = "Generic API Key"
+regex = '''(?i)(api[_-]?key|apikey)\s*[:=]\s*['\"]?([a-zA-Z0-9_-]{20,})['\"]?'''
+tags = ["api", "key"]
+
+[[rules]]
+id = "jwt-token"
+description = "JWT Token"
+regex = '''eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*'''
+tags = ["jwt", "token"]
+
+[[rules]]
+id = "private-key"
+description = "Private Key"
+regex = '''-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'''
+tags = ["private-key", "credentials"]
+
+[[rules]]
+id = "slack-webhook"
+description = "Slack Webhook"
+regex = '''https://hooks\.slack\.com/services/T[a-zA-Z0-9_]+/B[a-zA-Z0-9_]+/[a-zA-Z0-9_]+'''
+tags = ["slack", "webhook"]
+
+[[rules]]
+id = "database-url"
+description = "Database Connection String"
+regex = '''(?i)(mongodb|postgres|mysql|redis):\/\/[^\s]+'''
+tags = ["database", "credentials"]
+
+# Allowlist paths
+[allowlist]
+paths = [
+  '''node_modules''',
+  '''\.git''',
+  '''\.env\.example''',
+  '''.*test.*''',
+  '''.*spec.*''',
+  '''package-lock\.json''',
+  '''yarn\.lock'''
+]
+
+# Allowlist specific patterns (false positives)
+regexes = [
+  '''EXAMPLE_KEY''',
+  '''YOUR_API_KEY''',
+  '''<your-.*>''',
+  '''PLACEHOLDER'''
+]

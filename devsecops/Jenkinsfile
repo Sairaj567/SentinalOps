@@ -1,0 +1,412 @@
+// =============================================================================
+// SentinelOps - Jenkinsfile (CI/CD Security Pipeline)
+// =============================================================================
+// This pipeline implements DevSecOps with security scanning at each stage
+// =============================================================================
+
+pipeline {
+    agent any
+    
+    environment {
+        DOCKER_IMAGE = 'sentinelops/app'
+        DOCKER_TAG = "${BUILD_NUMBER}"
+        SCANNER_HOME = tool 'sonar-scanner'
+        TRIVY_CACHE = '/var/cache/trivy'
+    }
+    
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timestamps()
+        timeout(time: 1, unit: 'HOURS')
+        disableConcurrentBuilds()
+    }
+    
+    stages {
+        // =====================================================================
+        // STAGE 1: Checkout & Setup
+        // =====================================================================
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.GIT_COMMIT_SHORT = sh(
+                        script: 'git rev-parse --short HEAD',
+                        returnStdout: true
+                    ).trim()
+                }
+            }
+        }
+        
+        // =====================================================================
+        // STAGE 2: Secret Scanning (Gitleaks)
+        // =====================================================================
+        stage('Secret Scan') {
+            steps {
+                echo '🔍 Scanning for secrets and credentials...'
+                sh '''
+                    docker run --rm -v $(pwd):/repo \
+                        zricethezav/gitleaks:latest detect \
+                        --source /repo \
+                        --report-path /repo/gitleaks-report.json \
+                        --report-format json \
+                        --exit-code 0
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'gitleaks-report.json', allowEmptyArchive: true
+                }
+            }
+        }
+        
+        // =====================================================================
+        // STAGE 3: SAST - Static Application Security Testing (Semgrep)
+        // =====================================================================
+        stage('SAST Scan') {
+            steps {
+                echo '🔍 Running Static Application Security Testing...'
+                sh '''
+                    docker run --rm -v $(pwd):/src \
+                        returntocorp/semgrep:latest \
+                        semgrep scan \
+                        --config=auto \
+                        --json \
+                        --output=/src/semgrep-report.json \
+                        /src
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'semgrep-report.json', allowEmptyArchive: true
+                }
+            }
+        }
+        
+        // =====================================================================
+        // STAGE 4: Dependency Check (OWASP)
+        // =====================================================================
+        stage('Dependency Check') {
+            steps {
+                echo '🔍 Scanning dependencies for known vulnerabilities...'
+                sh '''
+                    docker run --rm \
+                        -v $(pwd):/src \
+                        -v /tmp/dependency-check-data:/usr/share/dependency-check/data \
+                        owasp/dependency-check:latest \
+                        --project "SentinelOps" \
+                        --scan /src \
+                        --format JSON \
+                        --out /src/dependency-check-report.json \
+                        --enableExperimental
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'dependency-check-report.json', allowEmptyArchive: true
+                }
+            }
+        }
+        
+        // =====================================================================
+        // STAGE 5: Build Application
+        // =====================================================================
+        stage('Build') {
+            parallel {
+                stage('Build Backend') {
+                    steps {
+                        dir('backend') {
+                            sh 'npm ci'
+                            sh 'npm run build'
+                        }
+                    }
+                }
+                stage('Build Frontend') {
+                    steps {
+                        dir('frontend') {
+                            sh 'npm ci'
+                            sh 'npm run build'
+                        }
+                    }
+                }
+                stage('Build ML Engine') {
+                    steps {
+                        dir('ml-engine') {
+                            sh 'pip install -r requirements.txt'
+                            sh 'python -m pytest tests/ --junitxml=test-results.xml'
+                        }
+                    }
+                }
+            }
+        }
+        
+        // =====================================================================
+        // STAGE 6: Unit Tests
+        // =====================================================================
+        stage('Unit Tests') {
+            parallel {
+                stage('Backend Tests') {
+                    steps {
+                        dir('backend') {
+                            sh 'npm test -- --coverage --coverageReporters=json'
+                        }
+                    }
+                }
+                stage('Frontend Tests') {
+                    steps {
+                        dir('frontend') {
+                            sh 'npm test -- --coverage --watchAll=false'
+                        }
+                    }
+                }
+            }
+        }
+        
+        // =====================================================================
+        // STAGE 7: Build Docker Images
+        // =====================================================================
+        stage('Docker Build') {
+            steps {
+                echo '🐳 Building Docker images...'
+                sh '''
+                    docker build -t ${DOCKER_IMAGE}-backend:${DOCKER_TAG} ./backend
+                    docker build -t ${DOCKER_IMAGE}-frontend:${DOCKER_TAG} ./frontend
+                    docker build -t ${DOCKER_IMAGE}-ml:${DOCKER_TAG} ./ml-engine
+                '''
+            }
+        }
+        
+        // =====================================================================
+        // STAGE 8: Container Security Scan (Trivy)
+        // =====================================================================
+        stage('Container Scan') {
+            steps {
+                echo '🔍 Scanning container images for vulnerabilities...'
+                sh '''
+                    # Scan backend image
+                    docker run --rm \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        -v ${TRIVY_CACHE}:/root/.cache/ \
+                        aquasec/trivy:latest image \
+                        --format json \
+                        --output /dev/stdout \
+                        ${DOCKER_IMAGE}-backend:${DOCKER_TAG} > trivy-backend-report.json
+                    
+                    # Scan frontend image
+                    docker run --rm \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        -v ${TRIVY_CACHE}:/root/.cache/ \
+                        aquasec/trivy:latest image \
+                        --format json \
+                        --output /dev/stdout \
+                        ${DOCKER_IMAGE}-frontend:${DOCKER_TAG} > trivy-frontend-report.json
+                    
+                    # Scan ML image
+                    docker run --rm \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        -v ${TRIVY_CACHE}:/root/.cache/ \
+                        aquasec/trivy:latest image \
+                        --format json \
+                        --output /dev/stdout \
+                        ${DOCKER_IMAGE}-ml:${DOCKER_TAG} > trivy-ml-report.json
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'trivy-*-report.json', allowEmptyArchive: true
+                }
+            }
+        }
+        
+        // =====================================================================
+        // STAGE 9: Security Gate
+        // =====================================================================
+        stage('Security Gate') {
+            steps {
+                echo '🚧 Evaluating security scan results...'
+                script {
+                    // Parse scan results and fail if critical issues found
+                    def trivyReport = readJSON file: 'trivy-backend-report.json'
+                    def criticalCount = 0
+                    def highCount = 0
+                    
+                    trivyReport.Results?.each { result ->
+                        result.Vulnerabilities?.each { vuln ->
+                            if (vuln.Severity == 'CRITICAL') criticalCount++
+                            if (vuln.Severity == 'HIGH') highCount++
+                        }
+                    }
+                    
+                    echo "Critical vulnerabilities: ${criticalCount}"
+                    echo "High vulnerabilities: ${highCount}"
+                    
+                    // Configurable thresholds
+                    if (criticalCount > 0) {
+                        error "Build failed: ${criticalCount} CRITICAL vulnerabilities found!"
+                    }
+                    if (highCount > 10) {
+                        unstable "Warning: ${highCount} HIGH vulnerabilities found"
+                    }
+                }
+            }
+        }
+        
+        // =====================================================================
+        // STAGE 10: Push to Registry
+        // =====================================================================
+        stage('Push Images') {
+            when {
+                branch 'main'
+            }
+            steps {
+                echo '📦 Pushing images to registry...'
+                withCredentials([usernamePassword(
+                    credentialsId: 'docker-registry',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh '''
+                        echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
+                        docker push ${DOCKER_IMAGE}-backend:${DOCKER_TAG}
+                        docker push ${DOCKER_IMAGE}-frontend:${DOCKER_TAG}
+                        docker push ${DOCKER_IMAGE}-ml:${DOCKER_TAG}
+                        
+                        # Tag as latest
+                        docker tag ${DOCKER_IMAGE}-backend:${DOCKER_TAG} ${DOCKER_IMAGE}-backend:latest
+                        docker tag ${DOCKER_IMAGE}-frontend:${DOCKER_TAG} ${DOCKER_IMAGE}-frontend:latest
+                        docker tag ${DOCKER_IMAGE}-ml:${DOCKER_TAG} ${DOCKER_IMAGE}-ml:latest
+                        docker push ${DOCKER_IMAGE}-backend:latest
+                        docker push ${DOCKER_IMAGE}-frontend:latest
+                        docker push ${DOCKER_IMAGE}-ml:latest
+                    '''
+                }
+            }
+        }
+        
+        // =====================================================================
+        // STAGE 11: Deploy to Staging
+        // =====================================================================
+        stage('Deploy Staging') {
+            when {
+                branch 'main'
+            }
+            steps {
+                echo '🚀 Deploying to staging environment...'
+                sh '''
+                    docker-compose -f docker-compose.staging.yml pull
+                    docker-compose -f docker-compose.staging.yml up -d
+                '''
+            }
+        }
+        
+        // =====================================================================
+        // STAGE 12: DAST - Dynamic Application Security Testing
+        // =====================================================================
+        stage('DAST Scan') {
+            when {
+                branch 'main'
+            }
+            steps {
+                echo '🔍 Running Dynamic Application Security Testing...'
+                sh '''
+                    # Wait for application to be ready
+                    sleep 30
+                    
+                    # Run OWASP ZAP scan
+                    docker run --rm \
+                        --network host \
+                        -v $(pwd):/zap/wrk:rw \
+                        owasp/zap2docker-stable zap-baseline.py \
+                        -t http://localhost:3000 \
+                        -r zap-report.html \
+                        -J zap-report.json
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'zap-report.*', allowEmptyArchive: true
+                    publishHTML([
+                        allowMissing: true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: '.',
+                        reportFiles: 'zap-report.html',
+                        reportName: 'OWASP ZAP Report'
+                    ])
+                }
+            }
+        }
+        
+        // =====================================================================
+        // STAGE 13: Send Results to SentinelOps
+        // =====================================================================
+        stage('Report to SentinelOps') {
+            steps {
+                echo '📊 Sending security results to SentinelOps dashboard...'
+                script {
+                    def payload = [
+                        buildNumber: env.BUILD_NUMBER,
+                        gitCommit: env.GIT_COMMIT_SHORT,
+                        timestamp: new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+                        scans: [
+                            secrets: 'gitleaks-report.json',
+                            sast: 'semgrep-report.json',
+                            dependencies: 'dependency-check-report.json',
+                            containers: [
+                                'trivy-backend-report.json',
+                                'trivy-frontend-report.json',
+                                'trivy-ml-report.json'
+                            ],
+                            dast: 'zap-report.json'
+                        ]
+                    ]
+                    
+                    writeJSON file: 'pipeline-results.json', json: payload
+                    
+                    // Send to SentinelOps API
+                    sh '''
+                        curl -X POST \
+                            -H "Content-Type: application/json" \
+                            -d @pipeline-results.json \
+                            http://sentinel-server:4000/api/pipeline/results || true
+                    '''
+                }
+            }
+        }
+    }
+    
+    // =========================================================================
+    // POST ACTIONS
+    // =========================================================================
+    post {
+        always {
+            echo '🧹 Cleaning up...'
+            sh '''
+                docker rmi ${DOCKER_IMAGE}-backend:${DOCKER_TAG} || true
+                docker rmi ${DOCKER_IMAGE}-frontend:${DOCKER_TAG} || true
+                docker rmi ${DOCKER_IMAGE}-ml:${DOCKER_TAG} || true
+            '''
+            cleanWs()
+        }
+        success {
+            echo '✅ Pipeline completed successfully!'
+            slackSend(
+                color: 'good',
+                message: "✅ SentinelOps Build #${BUILD_NUMBER} succeeded"
+            )
+        }
+        failure {
+            echo '❌ Pipeline failed!'
+            slackSend(
+                color: 'danger',
+                message: "❌ SentinelOps Build #${BUILD_NUMBER} failed"
+            )
+        }
+        unstable {
+            echo '⚠️ Pipeline unstable - security issues detected'
+            slackSend(
+                color: 'warning',
+                message: "⚠️ SentinelOps Build #${BUILD_NUMBER} has security warnings"
+            )
+        }
+    }
+}

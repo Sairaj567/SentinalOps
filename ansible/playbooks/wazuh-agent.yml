@@ -1,0 +1,83 @@
+# =============================================================================
+# SentinelOps - Ansible Playbook for Wazuh Agent Installation
+# =============================================================================
+# This playbook installs and configures Wazuh Agent on target servers
+# =============================================================================
+
+---
+- name: Install Wazuh Agent
+  hosts: agents
+  become: yes
+  vars:
+    wazuh_manager_ip: "{{ hostvars['sentinel']['ansible_host'] | default('10.0.1.10') }}"
+    wazuh_agent_group: "default"
+    
+  tasks:
+    # ============================================
+    # Prerequisites
+    # ============================================
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+
+    - name: Install required packages (Debian/Ubuntu)
+      apt:
+        name:
+          - curl
+          - apt-transport-https
+          - lsb-release
+          - gnupg
+        state: present
+      when: ansible_os_family == "Debian"
+
+    # ============================================
+    # Wazuh Repository
+    # ============================================
+    - name: Add Wazuh GPG key
+      apt_key:
+        url: https://packages.wazuh.com/key/GPG-KEY-WAZUH
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Add Wazuh repository
+      apt_repository:
+        repo: "deb https://packages.wazuh.com/4.x/apt/ stable main"
+        state: present
+        filename: wazuh
+      when: ansible_os_family == "Debian"
+
+    # ============================================
+    # Wazuh Agent Installation
+    # ============================================
+    - name: Install Wazuh Agent
+      apt:
+        name: wazuh-agent
+        state: present
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+      environment:
+        WAZUH_MANAGER: "{{ wazuh_manager_ip }}"
+        WAZUH_AGENT_GROUP: "{{ wazuh_agent_group }}"
+
+    - name: Configure Wazuh Agent
+      template:
+        src: ossec.conf.j2
+        dest: /var/ossec/etc/ossec.conf
+        mode: '0644'
+        owner: root
+        group: wazuh
+      notify: Restart Wazuh Agent
+
+    - name: Enable and start Wazuh Agent
+      systemd:
+        name: wazuh-agent
+        enabled: yes
+        state: started
+
+  handlers:
+    - name: Restart Wazuh Agent
+      systemd:
+        name: wazuh-agent
+        state: restarted

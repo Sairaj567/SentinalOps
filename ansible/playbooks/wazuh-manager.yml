@@ -1,0 +1,143 @@
+# =============================================================================
+# SentinelOps - Ansible Playbook for Wazuh Manager Installation
+# =============================================================================
+# This playbook installs and configures Wazuh Manager on the Sentinel server
+# =============================================================================
+
+---
+- name: Install Wazuh Manager
+  hosts: sentinel
+  become: yes
+  vars:
+    wazuh_manager_version: "4.7"
+    elasticsearch_version: "7.17.15"
+    
+  tasks:
+    # ============================================
+    # Prerequisites
+    # ============================================
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      apt:
+        name:
+          - curl
+          - apt-transport-https
+          - lsb-release
+          - gnupg
+          - software-properties-common
+        state: present
+
+    # ============================================
+    # Wazuh Repository
+    # ============================================
+    - name: Add Wazuh GPG key
+      apt_key:
+        url: https://packages.wazuh.com/key/GPG-KEY-WAZUH
+        state: present
+
+    - name: Add Wazuh repository
+      apt_repository:
+        repo: "deb https://packages.wazuh.com/4.x/apt/ stable main"
+        state: present
+        filename: wazuh
+
+    # ============================================
+    # Wazuh Manager Installation
+    # ============================================
+    - name: Install Wazuh Manager
+      apt:
+        name: wazuh-manager
+        state: present
+        update_cache: yes
+
+    - name: Enable and start Wazuh Manager
+      systemd:
+        name: wazuh-manager
+        enabled: yes
+        state: started
+
+    # ============================================
+    # Wazuh API Configuration
+    # ============================================
+    - name: Configure Wazuh API user
+      copy:
+        content: |
+          users:
+            - username: wazuh-wui
+              password: "{{ wazuh_api_password | default('SecurePassword123!') }}"
+        dest: /var/ossec/api/configuration/api.yaml
+        mode: '0640'
+        owner: root
+        group: wazuh
+
+    - name: Restart Wazuh Manager
+      systemd:
+        name: wazuh-manager
+        state: restarted
+
+    # ============================================
+    # Filebeat Installation (for log shipping)
+    # ============================================
+    - name: Add Elastic GPG key
+      apt_key:
+        url: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+        state: present
+
+    - name: Add Elastic repository
+      apt_repository:
+        repo: "deb https://artifacts.elastic.co/packages/7.x/apt stable main"
+        state: present
+        filename: elastic
+
+    - name: Install Filebeat
+      apt:
+        name: filebeat
+        state: present
+        update_cache: yes
+
+    - name: Download Wazuh Filebeat module
+      get_url:
+        url: https://packages.wazuh.com/4.x/filebeat/wazuh-filebeat-0.3.tar.gz
+        dest: /tmp/wazuh-filebeat-module.tar.gz
+
+    - name: Extract Filebeat module
+      unarchive:
+        src: /tmp/wazuh-filebeat-module.tar.gz
+        dest: /usr/share/filebeat/module
+        remote_src: yes
+
+    - name: Configure Filebeat
+      template:
+        src: filebeat.yml.j2
+        dest: /etc/filebeat/filebeat.yml
+        mode: '0644'
+
+    - name: Enable and start Filebeat
+      systemd:
+        name: filebeat
+        enabled: yes
+        state: started
+
+    # ============================================
+    # Firewall Configuration
+    # ============================================
+    - name: Allow Wazuh Manager ports
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - "1514"  # Agent communication
+        - "1515"  # Agent enrollment
+        - "55000" # Wazuh API
+        - "514"   # Syslog
+
+  handlers:
+    - name: Restart Wazuh Manager
+      systemd:
+        name: wazuh-manager
+        state: restarted
