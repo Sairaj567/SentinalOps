@@ -13,11 +13,26 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell
 } from 'recharts';
+import { formatDistanceToNow } from 'date-fns';
 import { api } from '../services/api';
 import StatCard from '../components/StatCard';
 import ThreatGauge from '../components/ThreatGauge';
 
 const COLORS = ['#ef4444', '#f97316', '#eab308', '#22c55e'];
+
+const severityColorDot: Record<string, string> = {
+  critical: 'bg-red-500',
+  high: 'bg-orange-500',
+  medium: 'bg-yellow-500',
+  low: 'bg-green-500',
+};
+
+const severityBadge: Record<string, string> = {
+  critical: 'bg-red-500/20 text-red-400',
+  high: 'bg-orange-500/20 text-orange-400',
+  medium: 'bg-yellow-500/20 text-yellow-400',
+  low: 'bg-green-500/20 text-green-400',
+};
 
 export default function Dashboard() {
   const { data: metrics, isLoading: metricsLoading } = useQuery({
@@ -36,6 +51,14 @@ export default function Dashboard() {
     queryKey: ['threat-stats'],
     queryFn: () => api.get('/threats/stats').then(res => res.data.data),
   });
+
+  const { data: recentAlertsData } = useQuery({
+    queryKey: ['recent-alerts'],
+    queryFn: () => api.get('/alerts', { params: { limit: 5, sort: '-timestamp' } }).then(res => res.data),
+    refetchInterval: 30000,
+  });
+
+  const recentAlerts = recentAlertsData?.data || [];
 
   if (metricsLoading) {
     return (
@@ -197,37 +220,31 @@ export default function Dashboard() {
             </a>
           </div>
           <div className="space-y-3">
-            {[1, 2, 3, 4, 5].map((i) => (
-              <div
-                key={i}
-                className="flex items-center justify-between p-3 bg-gray-900 rounded-lg"
-              >
-                <div className="flex items-center space-x-3">
-                  <div className={`w-2 h-2 rounded-full ${
-                    i === 1 ? 'bg-red-500' : i === 2 ? 'bg-orange-500' : 'bg-yellow-500'
-                  }`} />
-                  <div>
-                    <p className="text-sm text-white">
-                      {i === 1 ? 'Multiple failed SSH login attempts' :
-                       i === 2 ? 'Suspicious process detected' :
-                       i === 3 ? 'Port scan detected from external IP' :
-                       i === 4 ? 'Unusual outbound traffic' :
-                       'File integrity change detected'}
-                    </p>
-                    <p className="text-xs text-gray-500">
-                      10.0.1.{100 + i} • {i * 5} minutes ago
-                    </p>
+            {recentAlerts.length === 0 ? (
+              <p className="text-gray-500 text-center py-8">No recent alerts</p>
+            ) : (
+              recentAlerts.map((alert: any) => (
+                <div
+                  key={alert.alertId}
+                  className="flex items-center justify-between p-3 bg-gray-900 rounded-lg"
+                >
+                  <div className="flex items-center space-x-3">
+                    <div className={`w-2 h-2 rounded-full ${severityColorDot[alert.severity] || 'bg-gray-500'}`} />
+                    <div>
+                      <p className="text-sm text-white">
+                        {alert.rule?.name || alert.message || 'Unknown Alert'}
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        {alert.sourceIp} • {formatDistanceToNow(new Date(alert.timestamp), { addSuffix: true })}
+                      </p>
+                    </div>
                   </div>
+                  <span className={`px-2 py-1 text-xs rounded-full ${severityBadge[alert.severity] || 'bg-gray-500/20 text-gray-400'}`}>
+                    {alert.severity}
+                  </span>
                 </div>
-                <span className={`px-2 py-1 text-xs rounded-full ${
-                  i === 1 ? 'bg-red-500/20 text-red-400' :
-                  i === 2 ? 'bg-orange-500/20 text-orange-400' :
-                  'bg-yellow-500/20 text-yellow-400'
-                }`}>
-                  {i === 1 ? 'Critical' : i === 2 ? 'High' : 'Medium'}
-                </span>
-              </div>
-            ))}
+              ))
+            )}
           </div>
         </div>
 

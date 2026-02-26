@@ -5,24 +5,11 @@
 import { Router, Request, Response } from 'express';
 import { logger } from '../utils/logger';
 import axios from 'axios';
+import { Threat } from '../models/Threat';
 
 const router = Router();
 
 const ML_ENGINE_URL = process.env.ML_ENGINE_URL || 'http://localhost:5000';
-
-interface ThreatScore {
-  id: string;
-  timestamp: Date;
-  sourceIp: string;
-  threatScore: number;
-  classification: 'normal' | 'suspicious' | 'high_risk' | 'attack';
-  confidence: number;
-  features: Record<string, number>;
-  relatedAlerts: string[];
-}
-
-// In-memory storage for threat scores
-const threatScores: ThreatScore[] = [];
 
 // GET /api/threats - Get all threat scores
 router.get('/', async (req: Request, res: Response) => {
@@ -34,19 +21,15 @@ router.get('/', async (req: Request, res: Response) => {
       minScore,
     } = req.query;
 
-    let filtered = [...threatScores];
-
-    if (classification) {
-      filtered = filtered.filter(t => t.classification === classification);
-    }
-    if (minScore) {
-      filtered = filtered.filter(t => t.threatScore >= Number(minScore));
-    }
+    const filter: any = {};
+    if (classification) filter.classification = classification;
+    if (minScore) filter.threatScore = { $gte: Number(minScore) };
 
     const skip = (Number(page) - 1) * Number(limit);
-    const results = filtered
-      .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
-      .slice(skip, skip + Number(limit));
+    const [results, total] = await Promise.all([
+      Threat.find(filter).sort({ timestamp: -1 }).skip(skip).limit(Number(limit)).lean(),
+      Threat.countDocuments(filter),
+    ]);
 
     res.json({
       success: true,
@@ -54,7 +37,7 @@ router.get('/', async (req: Request, res: Response) => {
       pagination: {
         page: Number(page),
         limit: Number(limit),
-        total: filtered.length,
+        total,
       },
     });
   } catch (error) {
@@ -67,28 +50,44 @@ router.get('/', async (req: Request, res: Response) => {
 router.get('/stats', async (req: Request, res: Response) => {
   try {
     const now = new Date();
-    const last24h = threatScores.filter(t => 
-      now.getTime() - t.timestamp.getTime() < 24 * 60 * 60 * 1000
-    );
+    const last24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+    const [total, count24h, byClassification, avgResult, topThreats] = await Promise.all([
+      Threat.countDocuments(),
+      Threat.countDocuments({ timestamp: { $gte: last24h } }),
+      Threat.aggregate([
+        { $group: { _id: '$classification', count: { $sum: 1 } } },
+      ]),
+      Threat.aggregate([
+        { $group: { _id: null, avg: { $avg: '$threatScore' } } },
+      ]),
+      Threat.find()
+        .sort({ threatScore: -1 })
+        .limit(10)
+        .select('sourceIp threatScore classification')
+        .lean(),
+    ]);
+
+    const classificationMap: Record<string, number> = {};
+    byClassification.forEach((item: any) => {
+      classificationMap[item._id] = item.count;
+    });
 
     const stats = {
-      total: threatScores.length,
-      last24h: last24h.length,
+      total,
+      last24h: count24h,
       byClassification: {
-        normal: threatScores.filter(t => t.classification === 'normal').length,
-        suspicious: threatScores.filter(t => t.classification === 'suspicious').length,
-        high_risk: threatScores.filter(t => t.classification === 'high_risk').length,
-        attack: threatScores.filter(t => t.classification === 'attack').length,
+        normal: classificationMap['normal'] || 0,
+        suspicious: classificationMap['suspicious'] || 0,
+        high_risk: classificationMap['high_risk'] || 0,
+        attack: classificationMap['attack'] || 0,
       },
-      averageScore: threatScores.reduce((sum, t) => sum + t.threatScore, 0) / threatScores.length || 0,
-      topThreats: threatScores
-        .sort((a, b) => b.threatScore - a.threatScore)
-        .slice(0, 10)
-        .map(t => ({
-          sourceIp: t.sourceIp,
-          score: t.threatScore,
-          classification: t.classification,
-        })),
+      averageScore: avgResult[0]?.avg || 0,
+      topThreats: topThreats.map((t: any) => ({
+        sourceIp: t.sourceIp,
+        score: t.threatScore,
+        classification: t.classification,
+      })),
     };
 
     res.json({ success: true, data: stats });
@@ -111,10 +110,10 @@ router.post('/analyze', async (req: Request, res: Response) => {
 
     const predictions = response.data;
 
-    // Store threat scores
+    // Store threat scores in MongoDB
     for (const prediction of predictions) {
-      const threatScore: ThreatScore = {
-        id: `THREAT-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      const threat = new Threat({
+        threatId: `THREAT-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
         timestamp: new Date(),
         sourceIp: prediction.source_ip,
         threatScore: prediction.threat_score,
@@ -122,20 +121,15 @@ router.post('/analyze', async (req: Request, res: Response) => {
         confidence: prediction.confidence,
         features: prediction.features,
         relatedAlerts: prediction.related_alerts || [],
-      };
+      });
 
-      threatScores.push(threatScore);
-
-      // Keep only last 1000 scores
-      if (threatScores.length > 1000) {
-        threatScores.shift();
-      }
+      await threat.save();
 
       // Emit real-time event for high-risk threats
-      if (threatScore.classification === 'high_risk' || threatScore.classification === 'attack') {
+      if (threat.classification === 'high_risk' || threat.classification === 'attack') {
         const io = req.app.get('io');
         if (io) {
-          io.emit('high-threat', threatScore);
+          io.emit('high-threat', threat);
         }
       }
     }
@@ -169,7 +163,7 @@ router.get('/model/status', async (req: Request, res: Response) => {
   }
 });
 
-function classifyThreat(score: number): ThreatScore['classification'] {
+function classifyThreat(score: number): 'normal' | 'suspicious' | 'high_risk' | 'attack' {
   if (score >= 80) return 'attack';
   if (score >= 60) return 'high_risk';
   if (score >= 40) return 'suspicious';
@@ -177,3 +171,4 @@ function classifyThreat(score: number): ThreatScore['classification'] {
 }
 
 export default router;
+

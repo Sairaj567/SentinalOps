@@ -10,6 +10,9 @@ import {
   Bell, User
 } from 'lucide-react';
 import { useAuthStore } from '../stores/authStore';
+import NotificationPanel from './NotificationPanel';
+import CommandPalette from './CommandPalette';
+import { useWebSocket } from '../hooks/useWebSocket';
 
 const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
@@ -18,12 +21,17 @@ const navigation = [
   { name: 'Pipeline', href: '/pipeline', icon: GitBranch },
   { name: 'AI Threats', href: '/threats', icon: Zap },
   { name: 'Agents', href: '/agents', icon: Server },
+  { name: 'Settings', href: '/settings', icon: Settings },
 ];
 
 export default function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   const { user, logout } = useAuthStore();
   const navigate = useNavigate();
+
+  // Connect WebSocket and auto-invalidate caches
+  useWebSocket();
 
   const handleLogout = () => {
     logout();
@@ -67,9 +75,9 @@ export default function Layout() {
               key={item.name}
               to={item.href}
               className={({ isActive }) =>
-                `flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors ${
+                `flex items-center space-x-3 px-4 py-3 rounded-lg transition-all duration-200 ${
                   isActive
-                    ? 'bg-cyan-500/20 text-cyan-400'
+                  ? 'bg-cyan-500/20 text-cyan-400 nav-active-glow'
                     : 'text-gray-400 hover:bg-gray-700 hover:text-white'
                 }`
               }
@@ -118,18 +126,33 @@ export default function Layout() {
 
             <div className="flex items-center space-x-4">
               {/* Notifications */}
-              <button className="relative p-2 text-gray-400 hover:text-white transition-colors">
+              <button
+                onClick={() => setNotificationsOpen(!notificationsOpen)}
+                className="relative p-2 text-gray-400 hover:text-white transition-colors"
+              >
                 <Bell className="w-5 h-5" />
                 <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full" />
               </button>
 
               {/* Settings */}
-              <button className="p-2 text-gray-400 hover:text-white transition-colors">
+              <button
+                onClick={() => navigate('/settings')}
+                className="p-2 text-gray-400 hover:text-white transition-colors"
+              >
                 <Settings className="w-5 h-5" />
               </button>
             </div>
           </div>
         </header>
+
+        {/* Notification Panel */}
+        <NotificationPanel
+          isOpen={notificationsOpen}
+          onClose={() => setNotificationsOpen(false)}
+        />
+
+        {/* Command Palette */}
+        <CommandPalette />
 
         {/* Page content */}
         <main className="p-6">

@@ -1,105 +1,114 @@
 // =============================================================================
-// SentinelOps - Login Page
+// SentinelOps - Login Page (Enhanced with Glassmorphism + Animations)
 // =============================================================================
 
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Shield, Mail, Lock, AlertCircle } from 'lucide-react';
+import { Shield, Lock, Mail, ArrowRight, AlertCircle, ChevronRight } from 'lucide-react';
 import { useAuthStore } from '../stores/authStore';
 import { api } from '../services/api';
+import toast from 'react-hot-toast';
 
 export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
-  
-  const { setAuth } = useAuthStore();
+  const { login } = useAuthStore();
   const navigate = useNavigate();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
-    setLoading(true);
+    setIsLoading(true);
 
     try {
       const response = await api.post('/auth/login', { email, password });
-      
-      if (response.data.success) {
-        setAuth(response.data.data.token, response.data.data.user);
-        navigate('/dashboard');
-      }
+      login(response.data.token, response.data.user);
+      toast.success('Welcome back!');
+      navigate('/dashboard');
     } catch (err: any) {
-      setError(err.response?.data?.message || 'Login failed. Please try again.');
+      setError(err.response?.data?.message || 'Login failed');
     } finally {
-      setLoading(false);
+      setIsLoading(false);
     }
   };
 
-  // Demo login (for testing without backend)
-  const handleDemoLogin = () => {
-    setAuth('demo-token', {
-      id: '1',
-      email: 'demo@sentinelops.io',
-      name: 'Demo User',
-      role: 'admin'
-    });
-    navigate('/dashboard');
+  const handleDemoLogin = async () => {
+    setIsLoading(true);
+    setError('');
+    try {
+      const response = await api.post('/auth/login', {
+        email: 'admin@sentinelops.io',
+        password: 'Admin@2025!',
+      });
+      login(response.data.token, response.data.user);
+      toast.success('Demo mode activated!');
+      navigate('/dashboard');
+    } catch (err: any) {
+      // Fallback: create demo token for offline use
+      login('demo-token', { name: 'Admin User', email: 'admin@sentinelops.io', role: 'admin' });
+      toast.success('Demo mode activated (offline)');
+      navigate('/dashboard');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
-    <div className="min-h-screen bg-gray-900 flex items-center justify-center p-4">
-      <div className="w-full max-w-md">
-        {/* Logo */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-cyan-500/20 mb-4">
-            <Shield className="w-8 h-8 text-cyan-500" />
+    <div className="min-h-screen relative overflow-hidden flex items-center justify-center bg-gray-950 cyber-grid">
+      {/* Animated Background Orbs */}
+      <div className="orb orb-1" />
+      <div className="orb orb-2" />
+      <div className="orb orb-3" />
+
+      {/* Login Card */}
+      <div className="relative z-10 w-full max-w-md px-4 animate-fade-in-up">
+        <div className="glass-card rounded-2xl p-8">
+          {/* Logo & Header */}
+          <div className="text-center mb-8">
+            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-cyan-500 to-blue-600 mb-4 shadow-lg shadow-cyan-500/25">
+              <Shield className="w-8 h-8 text-white" />
+            </div>
+            <h1 className="text-2xl font-bold gradient-text">SentinelOps</h1>
+            <p className="text-gray-400 text-sm mt-2">AI-Powered DevSecOps Security Platform</p>
           </div>
-          <h1 className="text-3xl font-bold text-white">SentinelOps</h1>
-          <p className="text-gray-400 mt-2">AI-Powered Security Platform</p>
-        </div>
 
-        {/* Login Form */}
-        <div className="bg-gray-800 rounded-xl p-8 border border-gray-700">
-          <h2 className="text-xl font-semibold text-white mb-6">Sign in to your account</h2>
-
+          {/* Error Alert */}
           {error && (
-            <div className="mb-4 p-4 bg-red-500/10 border border-red-500/50 rounded-lg flex items-center space-x-3">
-              <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0" />
-              <p className="text-sm text-red-400">{error}</p>
+            <div className="flex items-center space-x-2 p-3 mb-6 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm animate-slide-down">
+              <AlertCircle className="w-4 h-4 flex-shrink-0" />
+              <span>{error}</span>
             </div>
           )}
 
-          <form onSubmit={handleSubmit} className="space-y-6">
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
-                Email address
-              </label>
+          {/* Login Form */}
+          <form onSubmit={handleSubmit} className="space-y-5">
+            <div className="space-y-1.5">
+              <label className="block text-sm font-medium text-gray-300">Email</label>
               <div className="relative">
                 <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500" />
                 <input
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  className="w-full pl-10 pr-4 py-3 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-cyan-500 transition-colors"
-                  placeholder="you@example.com"
+                  placeholder="admin@sentinelops.io"
+                  className="w-full pl-11 pr-4 py-3 bg-gray-900/50 border border-gray-700/50 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/20 transition-all"
                   required
                 />
               </div>
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
-                Password
-              </label>
+            <div className="space-y-1.5">
+              <label className="block text-sm font-medium text-gray-300">Password</label>
               <div className="relative">
                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500" />
                 <input
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="w-full pl-10 pr-4 py-3 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-cyan-500 transition-colors"
                   placeholder="••••••••"
+                  className="w-full pl-11 pr-4 py-3 bg-gray-900/50 border border-gray-700/50 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/20 transition-all"
                   required
                 />
               </div>
@@ -107,28 +116,42 @@ export default function Login() {
 
             <button
               type="submit"
-              disabled={loading}
-              className="w-full py-3 px-4 bg-cyan-500 hover:bg-cyan-600 text-white font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={isLoading}
+              className="w-full py-3.5 bg-gradient-to-r from-cyan-500 via-blue-500 to-cyan-500 animate-gradient text-white font-semibold rounded-xl shadow-lg shadow-cyan-500/25 hover:shadow-cyan-500/40 transition-all duration-300 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center space-x-2"
             >
-              {loading ? 'Signing in...' : 'Sign in'}
+              {isLoading ? (
+                <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              ) : (
+                <>
+                  <span>Sign In</span>
+                  <ArrowRight className="w-4 h-4" />
+                </>
+              )}
             </button>
           </form>
 
-          <div className="mt-6 pt-6 border-t border-gray-700">
-            <button
-              onClick={handleDemoLogin}
-              className="w-full py-3 px-4 bg-gray-700 hover:bg-gray-600 text-white font-medium rounded-lg transition-colors"
-            >
-              Continue with Demo Account
-            </button>
-            <p className="text-center text-gray-500 text-sm mt-4">
-              Use demo account to explore the dashboard
-            </p>
+          {/* Divider */}
+          <div className="flex items-center my-6">
+            <div className="flex-1 border-t border-gray-700/50" />
+            <span className="px-3 text-xs text-gray-500 uppercase tracking-wider">or</span>
+            <div className="flex-1 border-t border-gray-700/50" />
           </div>
+
+          {/* Demo Login */}
+          <button
+            onClick={handleDemoLogin}
+            disabled={isLoading}
+            className="w-full py-3 bg-gray-800/50 hover:bg-gray-700/50 border border-gray-700/50 hover:border-gray-600/50 text-gray-300 hover:text-white font-medium rounded-xl transition-all group flex items-center justify-center space-x-2"
+          >
+            <Shield className="w-4 h-4 text-cyan-400" />
+            <span>Launch Demo Mode</span>
+            <ChevronRight className="w-4 h-4 text-gray-500 group-hover:translate-x-1 transition-transform" />
+          </button>
         </div>
 
-        <p className="text-center text-gray-500 text-sm mt-8">
-          SentinelOps © 2024. All rights reserved.
+        {/* Footer */}
+        <p className="text-center text-gray-600 text-xs mt-6">
+          SentinelOps © 2025. Secured with enterprise-grade encryption.
         </p>
       </div>
     </div>

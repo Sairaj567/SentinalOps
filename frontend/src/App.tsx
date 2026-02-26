@@ -14,6 +14,7 @@ import Vulnerabilities from './pages/Vulnerabilities';
 import Pipeline from './pages/Pipeline';
 import Threats from './pages/Threats';
 import Agents from './pages/Agents';
+import Settings from './pages/Settings';
 import Login from './pages/Login';
 
 // Components
@@ -49,6 +50,7 @@ function App() {
               <Route path="/pipeline" element={<Pipeline />} />
               <Route path="/threats" element={<Threats />} />
               <Route path="/agents" element={<Agents />} />
+              <Route path="/settings" element={<Settings />} />
             </Route>
           </Route>
         </Routes>
