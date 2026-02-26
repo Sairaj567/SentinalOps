@@ -1,0 +1,715 @@
+// =============================================================================
+// SentinelOps - OCI Infrastructure Deployment Pipeline
+// =============================================================================
+// This Jenkins pipeline provisions infrastructure on Oracle Cloud Infrastructure
+// =============================================================================
+
+pipeline {
+    agent any
+    
+    environment {
+        // OCI Configuration
+        OCI_TENANCY_OCID     = credentials('oci-tenancy-ocid')
+        OCI_USER_OCID        = credentials('oci-user-ocid')
+        OCI_FINGERPRINT      = credentials('oci-fingerprint')
+        OCI_PRIVATE_KEY      = credentials('oci-private-key')
+        OCI_REGION           = 'us-ashburn-1'
+        OCI_COMPARTMENT_OCID = credentials('oci-compartment-ocid')
+        
+        // SSH Key for instances
+        SSH_PUBLIC_KEY       = credentials('sentinelops-ssh-public-key')
+        SSH_PRIVATE_KEY      = credentials('sentinelops-ssh-private-key')
+        
+        // Instance Configuration
+        SENTINEL_SHAPE       = 'VM.Standard.E4.Flex'
+        SENTINEL_OCPUS       = '2'
+        SENTINEL_MEMORY_GB   = '16'
+        VICTIM_SHAPE         = 'VM.Standard.E4.Flex'
+        VICTIM_OCPUS         = '1'
+        VICTIM_MEMORY_GB     = '8'
+        ATTACKER_SHAPE       = 'VM.Standard.E4.Flex'
+        ATTACKER_OCPUS       = '1'
+        ATTACKER_MEMORY_GB   = '8'
+    }
+    
+    parameters {
+        choice(
+            name: 'ACTION',
+            choices: ['plan', 'deploy', 'destroy', 'status'],
+            description: 'Infrastructure action to perform'
+        )
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['dev', 'staging', 'production'],
+            description: 'Target environment'
+        )
+        string(
+            name: 'VCN_CIDR',
+            defaultValue: '10.0.0.0/16',
+            description: 'CIDR block for VCN'
+        )
+    }
+    
+    stages {
+        stage('Setup OCI CLI') {
+            steps {
+                script {
+                    echo "🔧 Configuring OCI CLI..."
+                    
+                    sh '''
+                        # Create OCI config directory
+                        mkdir -p ~/.oci
+                        
+                        # Write OCI config file
+                        cat > ~/.oci/config << EOF
+[DEFAULT]
+user=${OCI_USER_OCID}
+fingerprint=${OCI_FINGERPRINT}
+tenancy=${OCI_TENANCY_OCID}
+region=${OCI_REGION}
+key_file=~/.oci/oci_api_key.pem
+EOF
+                        
+                        # Write private key
+                        echo "${OCI_PRIVATE_KEY}" > ~/.oci/oci_api_key.pem
+                        chmod 600 ~/.oci/oci_api_key.pem
+                        chmod 600 ~/.oci/config
+                        
+                        # Verify OCI CLI
+                        oci --version
+                        oci iam region list --output table
+                    '''
+                }
+            }
+        }
+        
+        stage('Check Existing Resources') {
+            when {
+                expression { params.ACTION in ['plan', 'deploy', 'status'] }
+            }
+            steps {
+                script {
+                    echo "📋 Checking existing OCI resources..."
+                    
+                    sh '''
+                        echo "=== Existing VCNs ==="
+                        oci network vcn list \
+                            --compartment-id ${OCI_COMPARTMENT_OCID} \
+                            --query "data[?contains(\"display-name\", 'sentinelops')].{Name:\"display-name\", OCID:id, State:\"lifecycle-state\"}" \
+                            --output table || true
+                        
+                        echo ""
+                        echo "=== Existing Instances ==="
+                        oci compute instance list \
+                            --compartment-id ${OCI_COMPARTMENT_OCID} \
+                            --query "data[?contains(\"display-name\", 'sentinelops')].{Name:\"display-name\", State:\"lifecycle-state\", Shape:shape}" \
+                            --output table || true
+                    '''
+                }
+            }
+        }
+        
+        stage('Create VCN & Networking') {
+            when {
+                expression { params.ACTION == 'deploy' }
+            }
+            steps {
+                script {
+                    echo "🌐 Creating VCN and networking components..."
+                    
+                    sh '''
+                        # Create VCN
+                        VCN_ID=$(oci network vcn create \
+                            --compartment-id ${OCI_COMPARTMENT_OCID} \
+                            --cidr-blocks '["${VCN_CIDR}"]' \
+                            --display-name "sentinelops-vcn-${ENVIRONMENT}" \
+                            --dns-label "sentinelops" \
+                            --query 'data.id' \
+                            --raw-output)
+                        
+                        echo "VCN_ID=${VCN_ID}" > infrastructure_ids.env
+                        echo "✅ VCN created: ${VCN_ID}"
+                        
+                        # Wait for VCN to be available
+                        sleep 10
+                        
+                        # Create Internet Gateway
+                        IGW_ID=$(oci network internet-gateway create \
+                            --compartment-id ${OCI_COMPARTMENT_OCID} \
+                            --vcn-id ${VCN_ID} \
+                            --display-name "sentinelops-igw" \
+                            --is-enabled true \
+                            --query 'data.id' \
+                            --raw-output)
+                        
+                        echo "IGW_ID=${IGW_ID}" >> infrastructure_ids.env
+                        echo "✅ Internet Gateway created: ${IGW_ID}"
+                        
+                        # Create Route Table
+                        RT_ID=$(oci network route-table create \
+                            --compartment-id ${OCI_COMPARTMENT_OCID} \
+                            --vcn-id ${VCN_ID} \
+                            --display-name "sentinelops-rt-public" \
+                            --route-rules "[{\"destination\":\"0.0.0.0/0\",\"destinationType\":\"CIDR_BLOCK\",\"networkEntityId\":\"${IGW_ID}\"}]" \
+                            --query 'data.id' \
+                            --raw-output)
+                        
+                        echo "RT_ID=${RT_ID}" >> infrastructure_ids.env
+                        echo "✅ Route Table created: ${RT_ID}"
+                        
+                        # Create Security List for Sentinel Server
+                        SENTINEL_SL_ID=$(oci network security-list create \
+                            --compartment-id ${OCI_COMPARTMENT_OCID} \
+                            --vcn-id ${VCN_ID} \
+                            --display-name "sentinelops-sl-sentinel" \
+                            --ingress-security-rules '[
+                                {"protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":22,"max":22}}},
+                                {"protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":443,"max":443}}},
+                                {"protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":9200,"max":9200}}},
+                                {"protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":5601,"max":5601}}},
+                                {"protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":3000,"max":3000}}},
+                                {"protocol":"6","source":"10.0.0.0/16","tcpOptions":{"destinationPortRange":{"min":1514,"max":1515}}},
+                                {"protocol":"6","source":"10.0.0.0/16","tcpOptions":{"destinationPortRange":{"min":55000,"max":55000}}}
+                            ]' \
+                            --egress-security-rules '[{"protocol":"all","destination":"0.0.0.0/0"}]' \
+                            --query 'data.id' \
+                            --raw-output)
+                        
+                        echo "SENTINEL_SL_ID=${SENTINEL_SL_ID}" >> infrastructure_ids.env
+                        echo "✅ Sentinel Security List created"
+                        
+                        # Create Security List for Victim Server
+                        VICTIM_SL_ID=$(oci network security-list create \
+                            --compartment-id ${OCI_COMPARTMENT_OCID} \
+                            --vcn-id ${VCN_ID} \
+                            --display-name "sentinelops-sl-victim" \
+                            --ingress-security-rules '[
+                                {"protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":22,"max":22}}},
+                                {"protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":80,"max":80}}},
+                                {"protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":443,"max":443}}},
+                                {"protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":3000,"max":3000}}},
+                                {"protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":8080,"max":8080}}},
+                                {"protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":8081,"max":8081}}},
+                                {"protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":8082,"max":8082}}}
+                            ]' \
+                            --egress-security-rules '[{"protocol":"all","destination":"0.0.0.0/0"}]' \
+                            --query 'data.id' \
+                            --raw-output)
+                        
+                        echo "VICTIM_SL_ID=${VICTIM_SL_ID}" >> infrastructure_ids.env
+                        echo "✅ Victim Security List created"
+                        
+                        # Create Public Subnet
+                        SUBNET_ID=$(oci network subnet create \
+                            --compartment-id ${OCI_COMPARTMENT_OCID} \
+                            --vcn-id ${VCN_ID} \
+                            --cidr-block "10.0.1.0/24" \
+                            --display-name "sentinelops-subnet-public" \
+                            --dns-label "public" \
+                            --route-table-id ${RT_ID} \
+                            --security-list-ids "[\"${SENTINEL_SL_ID}\"]" \
+                            --query 'data.id' \
+                            --raw-output)
+                        
+                        echo "SUBNET_ID=${SUBNET_ID}" >> infrastructure_ids.env
+                        echo "✅ Public Subnet created: ${SUBNET_ID}"
+                    '''
+                    
+                    archiveArtifacts artifacts: 'infrastructure_ids.env', fingerprint: true
+                }
+            }
+        }
+        
+        stage('Get Oracle Linux Image') {
+            when {
+                expression { params.ACTION == 'deploy' }
+            }
+            steps {
+                script {
+                    echo "🖼️ Getting latest Oracle Linux image..."
+                    
+                    sh '''
+                        # Get latest Oracle Linux 8 image
+                        IMAGE_ID=$(oci compute image list \
+                            --compartment-id ${OCI_COMPARTMENT_OCID} \
+                            --operating-system "Oracle Linux" \
+                            --operating-system-version "8" \
+                            --shape ${SENTINEL_SHAPE} \
+                            --sort-by TIMECREATED \
+                            --sort-order DESC \
+                            --limit 1 \
+                            --query 'data[0].id' \
+                            --raw-output)
+                        
+                        echo "IMAGE_ID=${IMAGE_ID}" >> infrastructure_ids.env
+                        echo "✅ Using Oracle Linux image: ${IMAGE_ID}"
+                    '''
+                }
+            }
+        }
+        
+        stage('Deploy Sentinel Server') {
+            when {
+                expression { params.ACTION == 'deploy' }
+            }
+            steps {
+                script {
+                    echo "🖥️ Deploying Sentinel SOC Server..."
+                    
+                    sh '''
+                        source infrastructure_ids.env
+                        
+                        # Create cloud-init script for Sentinel
+                        cat > sentinel-cloud-init.sh << 'SENTINEL_INIT'
+#!/bin/bash
+set -e
+
+# Update system
+dnf update -y
+dnf install -y curl wget git docker podman
+
+# Install Wazuh Manager (All-in-One)
+curl -sO https://packages.wazuh.com/4.7/wazuh-install.sh
+chmod +x wazuh-install.sh
+./wazuh-install.sh -a -i
+
+# Install Suricata IDS
+dnf install -y suricata
+systemctl enable suricata
+suricata-update
+systemctl start suricata
+
+# Install Grafana
+dnf install -y grafana
+systemctl enable grafana-server
+systemctl start grafana-server
+
+# Configure firewall
+firewall-cmd --permanent --add-port=443/tcp
+firewall-cmd --permanent --add-port=9200/tcp
+firewall-cmd --permanent --add-port=5601/tcp
+firewall-cmd --permanent --add-port=3000/tcp
+firewall-cmd --permanent --add-port=1514-1515/tcp
+firewall-cmd --permanent --add-port=55000/tcp
+firewall-cmd --reload
+
+echo "✅ Sentinel Server setup complete!"
+SENTINEL_INIT
+                        
+                        SENTINEL_ID=$(oci compute instance launch \
+                            --compartment-id ${OCI_COMPARTMENT_OCID} \
+                            --availability-domain "$(oci iam availability-domain list --query 'data[0].name' --raw-output)" \
+                            --shape ${SENTINEL_SHAPE} \
+                            --shape-config "{\"ocpus\":${SENTINEL_OCPUS},\"memoryInGBs\":${SENTINEL_MEMORY_GB}}" \
+                            --subnet-id ${SUBNET_ID} \
+                            --display-name "sentinelops-sentinel-${ENVIRONMENT}" \
+                            --image-id ${IMAGE_ID} \
+                            --ssh-authorized-keys-file <(echo "${SSH_PUBLIC_KEY}") \
+                            --user-data-file sentinel-cloud-init.sh \
+                            --assign-public-ip true \
+                            --query 'data.id' \
+                            --raw-output)
+                        
+                        echo "SENTINEL_ID=${SENTINEL_ID}" >> infrastructure_ids.env
+                        echo "✅ Sentinel Server launched: ${SENTINEL_ID}"
+                    '''
+                }
+            }
+        }
+        
+        stage('Deploy Victim Server') {
+            when {
+                expression { params.ACTION == 'deploy' }
+            }
+            steps {
+                script {
+                    echo "🎯 Deploying Victim Server with vulnerable apps..."
+                    
+                    sh '''
+                        source infrastructure_ids.env
+                        
+                        # Create cloud-init script for Victim
+                        cat > victim-cloud-init.sh << 'VICTIM_INIT'
+#!/bin/bash
+set -e
+
+# Update system
+dnf update -y
+dnf install -y docker git nodejs npm
+
+# Start Docker
+systemctl enable docker
+systemctl start docker
+
+# Install Docker Compose
+curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+chmod +x /usr/local/bin/docker-compose
+
+# Create vulnerable apps directory
+mkdir -p /opt/vulnerable-apps
+cd /opt/vulnerable-apps
+
+# Create Docker Compose for vulnerable applications
+cat > docker-compose.yml << 'EOF'
+version: '3.8'
+services:
+  dvwa:
+    image: vulnerables/web-dvwa
+    container_name: dvwa
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+  juice-shop:
+    image: bkimminich/juice-shop
+    container_name: juice-shop
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+  webgoat:
+    image: webgoat/webgoat
+    container_name: webgoat
+    ports:
+      - "8081:8080"
+      - "9090:9090"
+    restart: unless-stopped
+
+  mutillidae:
+    image: citizenstig/nowasp
+    container_name: mutillidae
+    ports:
+      - "8082:80"
+    restart: unless-stopped
+EOF
+
+# Start vulnerable applications
+docker-compose up -d
+
+# Install Wazuh Agent
+curl -so wazuh-agent.rpm https://packages.wazuh.com/4.x/yum/wazuh-agent-4.7.0-1.x86_64.rpm
+WAZUH_MANAGER="SENTINEL_IP" rpm -ivh wazuh-agent.rpm
+systemctl enable wazuh-agent
+systemctl start wazuh-agent
+
+# Configure firewall
+firewall-cmd --permanent --add-port=80/tcp
+firewall-cmd --permanent --add-port=3000/tcp
+firewall-cmd --permanent --add-port=8080-8082/tcp
+firewall-cmd --reload
+
+echo "✅ Victim Server setup complete!"
+VICTIM_INIT
+                        
+                        VICTIM_ID=$(oci compute instance launch \
+                            --compartment-id ${OCI_COMPARTMENT_OCID} \
+                            --availability-domain "$(oci iam availability-domain list --query 'data[0].name' --raw-output)" \
+                            --shape ${VICTIM_SHAPE} \
+                            --shape-config "{\"ocpus\":${VICTIM_OCPUS},\"memoryInGBs\":${VICTIM_MEMORY_GB}}" \
+                            --subnet-id ${SUBNET_ID} \
+                            --display-name "sentinelops-victim-${ENVIRONMENT}" \
+                            --image-id ${IMAGE_ID} \
+                            --ssh-authorized-keys-file <(echo "${SSH_PUBLIC_KEY}") \
+                            --user-data-file victim-cloud-init.sh \
+                            --assign-public-ip true \
+                            --query 'data.id' \
+                            --raw-output)
+                        
+                        echo "VICTIM_ID=${VICTIM_ID}" >> infrastructure_ids.env
+                        echo "✅ Victim Server launched: ${VICTIM_ID}"
+                    '''
+                }
+            }
+        }
+        
+        stage('Deploy Attacker Machine') {
+            when {
+                expression { params.ACTION == 'deploy' }
+            }
+            steps {
+                script {
+                    echo "💀 Deploying Attacker Machine..."
+                    
+                    sh '''
+                        source infrastructure_ids.env
+                        
+                        # Create cloud-init script for Attacker
+                        cat > attacker-cloud-init.sh << 'ATTACKER_INIT'
+#!/bin/bash
+set -e
+
+# Update system
+dnf update -y
+dnf install -y epel-release
+dnf install -y nmap nikto hydra sqlmap git python3 python3-pip
+
+# Install additional security tools
+pip3 install impacket
+pip3 install crackmapexec
+
+# Create attack scripts directory
+mkdir -p /opt/attack-scripts
+cd /opt/attack-scripts
+
+# Create attack runner script
+cat > run_attacks.sh << 'EOF'
+#!/bin/bash
+VICTIM_IP=${1:-"10.0.1.x"}
+
+echo "🎯 Starting attack simulation against $VICTIM_IP"
+echo "================================================"
+
+# Port scan
+echo "[1/5] Running port scan..."
+nmap -sV -sC -oN nmap_results.txt $VICTIM_IP
+
+# Web vulnerability scan
+echo "[2/5] Running web vulnerability scan..."
+nikto -h http://$VICTIM_IP:8080 -o nikto_results.txt
+
+# SQL Injection test
+echo "[3/5] Testing for SQL injection..."
+sqlmap -u "http://$VICTIM_IP:8080/vulnerabilities/sqli/?id=1" --batch --output-dir=sqlmap_results
+
+# SSH brute force (limited)
+echo "[4/5] Testing SSH (limited attempts)..."
+hydra -l admin -P /usr/share/wordlists/rockyou.txt -t 4 -V ssh://$VICTIM_IP 2>&1 | head -20
+
+echo "✅ Attack simulation complete!"
+EOF
+
+chmod +x run_attacks.sh
+
+echo "✅ Attacker Machine setup complete!"
+ATTACKER_INIT
+                        
+                        ATTACKER_ID=$(oci compute instance launch \
+                            --compartment-id ${OCI_COMPARTMENT_OCID} \
+                            --availability-domain "$(oci iam availability-domain list --query 'data[0].name' --raw-output)" \
+                            --shape ${ATTACKER_SHAPE} \
+                            --shape-config "{\"ocpus\":${ATTACKER_OCPUS},\"memoryInGBs\":${ATTACKER_MEMORY_GB}}" \
+                            --subnet-id ${SUBNET_ID} \
+                            --display-name "sentinelops-attacker-${ENVIRONMENT}" \
+                            --image-id ${IMAGE_ID} \
+                            --ssh-authorized-keys-file <(echo "${SSH_PUBLIC_KEY}") \
+                            --user-data-file attacker-cloud-init.sh \
+                            --assign-public-ip true \
+                            --query 'data.id' \
+                            --raw-output)
+                        
+                        echo "ATTACKER_ID=${ATTACKER_ID}" >> infrastructure_ids.env
+                        echo "✅ Attacker Machine launched: ${ATTACKER_ID}"
+                    '''
+                }
+            }
+        }
+        
+        stage('Wait for Instances') {
+            when {
+                expression { params.ACTION == 'deploy' }
+            }
+            steps {
+                script {
+                    echo "⏳ Waiting for instances to be running..."
+                    
+                    sh '''
+                        source infrastructure_ids.env
+                        
+                        # Wait for Sentinel
+                        echo "Waiting for Sentinel server..."
+                        oci compute instance get --instance-id ${SENTINEL_ID} --query 'data."lifecycle-state"' --raw-output
+                        while [ "$(oci compute instance get --instance-id ${SENTINEL_ID} --query 'data.\"lifecycle-state\"' --raw-output)" != "RUNNING" ]; do
+                            sleep 10
+                            echo "  Still waiting..."
+                        done
+                        echo "✅ Sentinel is running"
+                        
+                        # Wait for Victim
+                        echo "Waiting for Victim server..."
+                        while [ "$(oci compute instance get --instance-id ${VICTIM_ID} --query 'data.\"lifecycle-state\"' --raw-output)" != "RUNNING" ]; do
+                            sleep 10
+                        done
+                        echo "✅ Victim is running"
+                        
+                        # Wait for Attacker
+                        echo "Waiting for Attacker machine..."
+                        while [ "$(oci compute instance get --instance-id ${ATTACKER_ID} --query 'data.\"lifecycle-state\"' --raw-output)" != "RUNNING" ]; do
+                            sleep 10
+                        done
+                        echo "✅ Attacker is running"
+                    '''
+                }
+            }
+        }
+        
+        stage('Get Instance IPs') {
+            when {
+                expression { params.ACTION == 'deploy' }
+            }
+            steps {
+                script {
+                    echo "📍 Getting instance IP addresses..."
+                    
+                    sh '''
+                        source infrastructure_ids.env
+                        
+                        # Get Sentinel IP
+                        SENTINEL_IP=$(oci compute instance list-vnics \
+                            --instance-id ${SENTINEL_ID} \
+                            --query 'data[0]."public-ip"' \
+                            --raw-output)
+                        echo "SENTINEL_IP=${SENTINEL_IP}" >> infrastructure_ids.env
+                        
+                        # Get Victim IP
+                        VICTIM_IP=$(oci compute instance list-vnics \
+                            --instance-id ${VICTIM_ID} \
+                            --query 'data[0]."public-ip"' \
+                            --raw-output)
+                        echo "VICTIM_IP=${VICTIM_IP}" >> infrastructure_ids.env
+                        
+                        # Get Attacker IP
+                        ATTACKER_IP=$(oci compute instance list-vnics \
+                            --instance-id ${ATTACKER_ID} \
+                            --query 'data[0]."public-ip"' \
+                            --raw-output)
+                        echo "ATTACKER_IP=${ATTACKER_IP}" >> infrastructure_ids.env
+                        
+                        echo ""
+                        echo "╔════════════════════════════════════════════════════════════╗"
+                        echo "║  🛡️  SentinelOps Infrastructure Deployed Successfully!     ║"
+                        echo "╠════════════════════════════════════════════════════════════╣"
+                        echo "║                                                            ║"
+                        echo "║  Sentinel Server (SOC):  ${SENTINEL_IP}                    ║"
+                        echo "║  Victim Server:          ${VICTIM_IP}                      ║"
+                        echo "║  Attacker Machine:       ${ATTACKER_IP}                    ║"
+                        echo "║                                                            ║"
+                        echo "║  Access URLs:                                              ║"
+                        echo "║  - Wazuh Dashboard: https://${SENTINEL_IP}:443             ║"
+                        echo "║  - Kibana:          https://${SENTINEL_IP}:5601            ║"
+                        echo "║  - Grafana:         http://${SENTINEL_IP}:3000             ║"
+                        echo "║  - DVWA:            http://${VICTIM_IP}:8080               ║"
+                        echo "║  - Juice Shop:      http://${VICTIM_IP}:3000               ║"
+                        echo "║                                                            ║"
+                        echo "╚════════════════════════════════════════════════════════════╝"
+                    '''
+                    
+                    archiveArtifacts artifacts: 'infrastructure_ids.env', fingerprint: true
+                }
+            }
+        }
+        
+        stage('Destroy Infrastructure') {
+            when {
+                expression { params.ACTION == 'destroy' }
+            }
+            steps {
+                script {
+                    echo "🗑️ Destroying infrastructure..."
+                    
+                    input message: 'Are you sure you want to destroy the infrastructure?', ok: 'Yes, Destroy'
+                    
+                    sh '''
+                        # Terminate all SentinelOps instances
+                        INSTANCES=$(oci compute instance list \
+                            --compartment-id ${OCI_COMPARTMENT_OCID} \
+                            --query "data[?contains(\"display-name\", 'sentinelops')].id" \
+                            --raw-output | tr -d '[]",' | tr ' ' '\n')
+                        
+                        for INSTANCE_ID in $INSTANCES; do
+                            if [ -n "$INSTANCE_ID" ]; then
+                                echo "Terminating instance: $INSTANCE_ID"
+                                oci compute instance terminate --instance-id $INSTANCE_ID --force
+                            fi
+                        done
+                        
+                        echo "⏳ Waiting for instances to terminate..."
+                        sleep 60
+                        
+                        # Delete subnets
+                        SUBNETS=$(oci network subnet list \
+                            --compartment-id ${OCI_COMPARTMENT_OCID} \
+                            --query "data[?contains(\"display-name\", 'sentinelops')].id" \
+                            --raw-output | tr -d '[]",' | tr ' ' '\n')
+                        
+                        for SUBNET_ID in $SUBNETS; do
+                            if [ -n "$SUBNET_ID" ]; then
+                                echo "Deleting subnet: $SUBNET_ID"
+                                oci network subnet delete --subnet-id $SUBNET_ID --force || true
+                            fi
+                        done
+                        
+                        sleep 30
+                        
+                        # Delete security lists
+                        SEC_LISTS=$(oci network security-list list \
+                            --compartment-id ${OCI_COMPARTMENT_OCID} \
+                            --query "data[?contains(\"display-name\", 'sentinelops')].id" \
+                            --raw-output | tr -d '[]",' | tr ' ' '\n')
+                        
+                        for SL_ID in $SEC_LISTS; do
+                            if [ -n "$SL_ID" ]; then
+                                echo "Deleting security list: $SL_ID"
+                                oci network security-list delete --security-list-id $SL_ID --force || true
+                            fi
+                        done
+                        
+                        # Delete route tables
+                        ROUTE_TABLES=$(oci network route-table list \
+                            --compartment-id ${OCI_COMPARTMENT_OCID} \
+                            --query "data[?contains(\"display-name\", 'sentinelops')].id" \
+                            --raw-output | tr -d '[]",' | tr ' ' '\n')
+                        
+                        for RT_ID in $ROUTE_TABLES; do
+                            if [ -n "$RT_ID" ]; then
+                                echo "Deleting route table: $RT_ID"
+                                oci network route-table delete --rt-id $RT_ID --force || true
+                            fi
+                        done
+                        
+                        # Delete internet gateways
+                        IGWS=$(oci network internet-gateway list \
+                            --compartment-id ${OCI_COMPARTMENT_OCID} \
+                            --query "data[?contains(\"display-name\", 'sentinelops')].id" \
+                            --raw-output | tr -d '[]",' | tr ' ' '\n')
+                        
+                        for IGW_ID in $IGWS; do
+                            if [ -n "$IGW_ID" ]; then
+                                echo "Deleting internet gateway: $IGW_ID"
+                                oci network internet-gateway delete --ig-id $IGW_ID --force || true
+                            fi
+                        done
+                        
+                        sleep 30
+                        
+                        # Delete VCNs
+                        VCNS=$(oci network vcn list \
+                            --compartment-id ${OCI_COMPARTMENT_OCID} \
+                            --query "data[?contains(\"display-name\", 'sentinelops')].id" \
+                            --raw-output | tr -d '[]",' | tr ' ' '\n')
+                        
+                        for VCN_ID in $VCNS; do
+                            if [ -n "$VCN_ID" ]; then
+                                echo "Deleting VCN: $VCN_ID"
+                                oci network vcn delete --vcn-id $VCN_ID --force || true
+                            fi
+                        done
+                        
+                        echo "✅ Infrastructure destroyed"
+                    '''
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            cleanWs()
+        }
+        success {
+            echo "✅ Pipeline completed successfully!"
+        }
+        failure {
+            echo "❌ Pipeline failed. Check logs for details."
+        }
+    }
+}
